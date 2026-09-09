@@ -9,13 +9,36 @@
 t=0
 
 -- tuning constants
-STEP_TICKS=3        -- frames per movement step (controls runner speed)
-GUARD_STEP_TICKS=6  -- frames per movement step for guards (higher = slower than the runner)
+STEP_TICKS=3        -- frames per movement step (controls runner speed, and the guard scheduler's cadence)
+GUARD_STEP_TICKS=6  -- only used to size the post-escape grace period; guard speed comes from MOVE_POLICY
 HOLE_LIFETIME=360    -- ticks until a dug hole refills itself
 GUARD_TRAP_ESCAPE=150 -- ticks a trapped guard needs to climb back out
 LEVEL_COMPLETE_WAIT=360 -- 6 seconds at 60 TIC-80 frames per second
 LIVES_START=3
 SCREEN_HEIGHT=136
+
+-- guard AI flags / game options
+guards_pit_aware=true
+
+-- classic Lode Runner move policy, indexed by guard count then cycle position:
+-- the total step budget grows sublinearly, so a crowd of guards is individually slower than a lone one
+MOVE_POLICY={
+ {0,0,0,0,0,0},
+ {0,1,1,0,1,1},
+ {1,1,1,1,1,1},
+ {1,2,1,1,2,1},
+ {1,2,2,1,2,2},
+ {2,2,2,2,2,2},
+ {2,2,3,2,2,3},
+ {2,3,3,2,3,3},
+ {3,3,3,3,3,3},
+ {3,3,4,3,3,4},
+ {3,4,4,3,4,4},
+ {4,4,4,4,4,4}
+}
+MOVE_CYCLE=6
+move_offset=0
+move_id=0
 
 -- game state
 current_level=3
@@ -108,11 +131,26 @@ spr_runner_fall=40 -- 40
 runner=level_data[current_level][2]
 guards=level_data[current_level][3]
 
+level_w=0
+level_h=0
+
+function set_level_bounds()
+ level_h=#level
+ level_w=0
+ for ly=1,level_h do
+  local n=level[ly]:len()
+  if n>level_w then level_w=n end
+ end
+end
+
 function load_level(level_index)
  current_level=level_index
  level=level_data[current_level][1]
  runner=level_data[current_level][2]
  guards=level_data[current_level][3]
+ set_level_bounds()
+ move_offset=0
+ move_id=0
  boxes_remaining=count_boxes()
  ladders_revealed=false
  level_complete=false
@@ -178,7 +216,7 @@ end
 -- shared physics: horizontal movement blocked by bricks/floor, disabled while falling
 function try_move_horizontal(e,left,right)
  if e.falling then return end
- if t%(e.step or STEP_TICKS)~=0 then return end
+ if not e.ready then return end
  if left then
   local new_x=e.x-2
   local edge=tile_char_at_pixel(new_x,e.y+4)
@@ -198,7 +236,7 @@ end
 
 -- shared physics: ladder climbing and bar-drop, with flush snapping onto tile boundaries
 function try_vertical_move(e,up,down)
- if t%(e.step or STEP_TICKS)~=0 then return false end
+ if not e.ready then return false end
  local cur,cur_tx,cur_ty,below,below_tx,below_ty=get_context(e.x,e.y)
  local on_ladder=is_visible_ladder_char(cur)
  local above_ladder=is_visible_ladder_char(below)
@@ -221,7 +259,9 @@ function try_vertical_move(e,up,down)
  end
 
  if down then
-  if on_ladder or above_ladder then
+  -- at the foot of a ladder the column snap would pin the entity in place, so refuse the step entirely
+  local blocked_below=is_solid(below) and e.y%8==0
+  if (on_ladder or above_ladder) and not blocked_below then
    e.x=8*((on_ladder and cur_tx or below_tx)-1) -- snap onto the ladder's column when climbing starts
    e.y=e.y+2
    e.falling=false
@@ -262,7 +302,7 @@ function apply_gravity(e,moved_vert,down_pressed)
   end
  end
 
- if e.falling and t%(e.step or STEP_TICKS)==0 then
+ if e.falling and e.ready then
   e.y=e.y+2
  end
 
@@ -353,16 +393,172 @@ function check_trap(g)
  end
 end
 
--- simple retro-style chase: head towards the runner horizontally and vertically
+-- classic Lode Runner guard AI: rate every descent/climb point on the guard's
+-- current floor segment, then head towards the one that lands nearest the runner
+
+function tile_of(e)
+ local _,tx,ty=tile_char_at_pixel(e.x+4,e.y+4)
+ return tx,ty
+end
+
+-- a tile you can stand on top of
+function supports_walking(c)
+ return is_solid(c) or is_visible_ladder_char(c)
+end
+
+function is_guard_pit(tx,ty)
+ return guards_pit_aware and holes[tx..","..ty]~=nil
+end
+
+-- a tile you can traverse sideways while standing in it
+function can_walk_at(tx,ty)
+ if is_guard_pit(tx,ty) then return false end
+ if not guards_pit_aware and (holes[tx..","..ty]~=nil or holes[tx..","..(ty+1)]~=nil) then return true end
+ local here=tile_xy(tx,ty)
+ if is_visible_ladder_char(here) or here=="-" then return true end
+ if ty>=level_h then return true end
+ local below=tile_xy(tx,ty+1)
+ return supports_walking(below) or below=="-" or below=="$"
+end
+
+-- a spot the guard could branch off sideways from instead of continuing to fall
+function can_branch(tx,ty)
+ if is_guard_pit(tx,ty) then return false end
+ local below=tile_xy(tx,ty+1)
+ return supports_walking(below) or tile_xy(tx,ty)=="-"
+end
+
+-- lower is better: reaching the runner's row beats ending above it, which beats ending below it
+function scan_rate(x,y,runner_ty,start_x)
+ if y==runner_ty then return math.abs(start_x-x) end
+ if y>runner_ty then return y-runner_ty+200 end
+ return runner_ty-y+100
+end
+
+-- follow a fall/descent down column tx, stopping where a sideways escape exists
+function scan_down(tx,start_ty,runner_ty)
+ local y=start_ty
+ while y<level_h and not is_solid(tile_xy(tx,y+1)) do
+   if is_guard_pit(tx,y) then return nil end
+  local here=tile_xy(tx,y)
+  local free=(here==" ") or (here=="h" and not ladders_revealed)
+  if not free then
+   if tx>1 and can_branch(tx-1,y) and y>=runner_ty then break end
+   if tx<level_w and can_branch(tx+1,y) and y>=runner_ty then break end
+  end
+  y=y+1
+ end
+ return y
+end
+
+-- follow a ladder up column tx, stopping where a sideways escape exists
+function scan_up(tx,start_ty,runner_ty)
+ local y=start_ty
+ while y>1 and is_visible_ladder_char(tile_xy(tx,y)) do
+  y=y-1
+  if tx>1 and can_branch(tx-1,y) and y<=runner_ty then break end
+  if tx<level_w and can_branch(tx+1,y) and y<=runner_ty then break end
+ end
+ return y
+end
+
+function scan_floor(g)
+ local start_x,start_y=tile_of(g)
+ local _,_,runner_ty=tile_char_at_pixel(runner.x+4,runner.y+4)
+ local best_rating=255
+ local best_path=nil
+
+ local function rate(tx,y,path)
+  local r=scan_rate(tx,y,runner_ty,start_x)
+  if r<best_rating then
+   best_rating=r
+   best_path=path
+  end
+ end
+
+ local function probe(tx,down_path,up_path)
+  if not is_solid(tile_xy(tx,start_y+1)) then
+    local landing_y=scan_down(tx,start_y,runner_ty)
+    if landing_y then rate(tx,landing_y,down_path) end
+  end
+  if is_visible_ladder_char(tile_xy(tx,start_y)) then
+   rate(tx,scan_up(tx,start_y,runner_ty),up_path)
+  end
+ end
+
+ -- extent of the contiguous walkable floor segment, including one tile into the drop at each end
+ local x=start_x
+ while x>1 and not is_solid(tile_xy(x-1,start_y)) do
+  local walkable=can_walk_at(x-1,start_y)
+  x=x-1
+  if not walkable then break end
+ end
+ local left_end=x
+
+ x=start_x
+ while x<level_w and not is_solid(tile_xy(x+1,start_y)) do
+  local walkable=can_walk_at(x+1,start_y)
+  x=x+1
+  if not walkable then break end
+ end
+ local right_end=x
+
+ probe(start_x,"down","up")
+
+ local path="left"
+ x=left_end
+ while true do
+  if x==start_x then
+   if path=="left" and right_end~=start_x then
+    path="right"
+    x=right_end
+   else
+    break
+   end
+  end
+  probe(x,path,path)
+  if path=="left" then x=x+1 else x=x-1 end
+ end
+
+ return best_path
+end
+
+-- returns a single action: "left", "right", "up", "down" or nil
 function guard_ai(g)
- local dx=runner.x-g.x
- local dy=runner.y-g.y
- local left,right,up,down=false,false,false,false
- if dx<-1 then left=true
- elseif dx>1 then right=true end
- if dy<-2 then up=true
- elseif dy>2 then down=true end
- return left,right,up,down
+ local gx,gy=tile_of(g)
+ local _,rx,ry=tile_char_at_pixel(runner.x+4,runner.y+4)
+
+ -- if the runner shares our floor, walk a virtual cursor across to confirm a path exists
+ if gy==ry and not runner.falling then
+  local x=gx
+  while x~=rx and can_walk_at(x,gy) do
+   if x<rx then x=x+1 else x=x-1 end
+  end
+  if x==rx then
+   if g.x<runner.x then return "right" end
+   if g.x>runner.x then return "left" end
+   return nil
+  end
+ end
+
+ return scan_floor(g)
+end
+
+-- hands out this frame's step budget round-robin; a skipped guard still consumes its slot
+function schedule_guards()
+ for _,g in ipairs(guards) do g.ready=false end
+ local n=#guards
+ if n==0 or t%STEP_TICKS~=0 then return end
+ move_offset=move_offset+1
+ if move_offset>MOVE_CYCLE then move_offset=1 end
+ local moves=MOVE_POLICY[math.min(n,#MOVE_POLICY-1)+1][move_offset]
+ while moves>0 do
+  move_id=move_id+1
+  if move_id>n then move_id=1 end
+  local g=guards[move_id]
+  if g.state~="trapped" then g.ready=true end
+  moves=moves-1
+ end
 end
 
 function update_guard(g)
@@ -378,10 +574,10 @@ function update_guard(g)
   end
   return
  end
- local left,right,up,down=guard_ai(g)
- try_move_horizontal(g,left,right)
- local moved_vert=try_vertical_move(g,up,down)
- apply_gravity(g,moved_vert,down)
+ local action=guard_ai(g)
+ try_move_horizontal(g,action=="left",action=="right")
+ local moved_vert=try_vertical_move(g,action=="up",action=="down")
+ apply_gravity(g,moved_vert,action=="down")
  check_trap(g)
 end
 
@@ -416,7 +612,10 @@ end
 
 function TIC()
  -- init boxes count once
- if t==0 then boxes_remaining=count_boxes() end
+ if t==0 then
+  set_level_bounds()
+  boxes_remaining=count_boxes()
+ end
 
  if level_complete and not final_level_complete then
   level_complete_timer=level_complete_timer+1
@@ -431,6 +630,7 @@ function TIC()
 
  if not game_over and not level_complete then
   -- runner input & movement (disabled while falling, per shared physics)
+  runner.ready=(t%STEP_TICKS==0)
   try_move_horizontal(runner,btn(2),btn(3))
   local moved_vert=try_vertical_move(runner,btn(0),btn(1))
   apply_gravity(runner,moved_vert,btn(1))
@@ -449,6 +649,7 @@ function TIC()
   if btnp(5) then try_dig(1) end
 
   update_holes()
+  schedule_guards()
   for _,g in ipairs(guards) do update_guard(g) end
    check_offscreen_falls()
   check_guard_collision()
