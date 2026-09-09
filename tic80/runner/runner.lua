@@ -18,7 +18,7 @@ LIVES_START=3
 SCREEN_HEIGHT=136
 
 -- guard AI flags / game options
-guards_pit_aware=true
+guards_pit_aware=false
 
 -- classic Lode Runner move policy, indexed by guard count then cycle position:
 -- the total step budget grows sublinearly, so a crowd of guards is individually slower than a lone one
@@ -41,7 +41,7 @@ move_offset=0
 move_id=0
 
 -- game state
-current_level=3
+current_level=1
 boxes_remaining=0
 ladders_revealed=false
 level_complete=false
