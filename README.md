@@ -43,7 +43,7 @@ load mandelbrot.tic
 run
 ```
 
-### Screenshots
+### TIC-80 Cartridges
 
 ![Mandelbrot Generator](tic80/mandelbrot/mandelbrot.png)
 
