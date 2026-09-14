@@ -1,7 +1,7 @@
 -- title:   runner
 -- author:  Oliver
--- desc:    short description
--- site:    website link
+-- desc:    A classic arcade runner with traps, guards, and treasure.
+-- site:    https://github.com/OMerkel/tic80_pico8
 -- license: MIT License
 -- version: 0.2
 -- script:  lua
