@@ -79,6 +79,8 @@ classDiagram
         +number trapped_timer
         +number tx
         +number ty
+        +boolean carrying
+        +number carry_timer
     }
 
     class Hole {
@@ -165,6 +167,20 @@ stateDiagram-v2
     end note
 ```
 
+Guards can carry at most one box. When a running guard enters a box tile, the tile is
+cleared and `carrying` becomes true; `boxes_remaining` is unchanged because the box has
+not been collected by the runner. The guard carries it for
+`GUARD_BOX_CARRY_TICKS + math.random(0, GUARD_BOX_CARRY_RANDOM)` ticks, currently
+`600 + random(0, 360)`, then restores the box at the guard's current tile. If the guard
+falls into a live pit, `drop_guard_box_in_pit` restores the box at the surface tile
+directly above the pit instead. Respawning a carrying guard also restores its box before
+clearing the carry state.
+
+The optional `draw_carried_box` flag controls the visual representation independently of
+the gameplay state. It defaults to `true`, and when enabled the carried box is drawn one
+tile above the guard after guard sprites have been rendered. Setting it to `false` hides
+the carried sprite without changing pickup, timing, or drop behavior.
+
 ## 4. Guard AI in Detail
 
 The guard AI is a feature enhanced version of classic runner or chasing games. It replaced an earlier
@@ -200,7 +216,7 @@ step silently discarded every frame, pinning the guard to the ladder column.
 ### 4.2 Pit-Awareness Policy
 
 `guards_pit_aware` controls only route planning; it does not disable pit physics or trap
-detection. The default is `true`.
+detection. The default is `false`.
 
 ```lua
 guards_pit_aware=true   -- guards route around live dug pits
@@ -961,7 +977,7 @@ sequenceDiagram
         Loop->>Holes: update_holes() (tick down, refill, respawn trapped guard)
         Loop->>Guards: schedule_guards() (clear ready flags, grant shared step budget)
         loop each guard
-            Loop->>Guards: update_guard() (AI -> ready-gated physics -> check_trap)
+            Loop->>Guards: update_guard() (AI -> physics -> pit drop -> trap -> box state)
         end
         Loop->>Collision: check_guard_collision() -> lose_life() if caught
         Loop->>Collision: check_offscreen_falls() -> runner loses life or guard respawns
@@ -969,6 +985,7 @@ sequenceDiagram
     end
     Loop->>Render: draw level tiles
     Loop->>Render: draw guards (state-based sprite)
+    Loop->>Render: optionally draw carried boxes (`draw_carried_box`)
     Loop->>Render: draw runner (animation state)
     Loop->>Render: draw HUD (boxes/lives or game-over/level-complete)
     Loop->>Render: draw level progress and transition countdown
@@ -1060,10 +1077,10 @@ sequenceDiagram
 | `try_dig` (incl. above-tile solid check), `update_holes`, `close_all_holes` | Hole creation, above-tile validation, lifetime management, buried-runner death, and pit cleanup before respawn | FR-3.x, FR-5.2a |
 | `guard_ai`, `scan_floor`, `scan_down`, `scan_up`, `scan_rate`, `is_guard_pit`, `can_walk_at`, `can_branch` | Classic runner or chasing game pursuit: same-floor dash, floor-segment scan, banded rating, and configurable live-pit awareness (see section 4) | FR-4.x |
 | `schedule_guards`, `MOVE_POLICY` | Shared guard step budget; sublinear difficulty scaling with guard count | FR-4.x, NFR-2.2 |
-| `update_guard`, `check_trap`, `respawn_guard`, `guard_support_at` | Guard lifecycle: action dispatch, trapping, escape (with grace)/respawn, safe-support behavior | FR-4.x |
+| `update_guard`, `check_trap`, `respawn_guard`, `guard_support_at`, `update_guard_box`, `drop_guard_box_in_pit` | Guard lifecycle: action dispatch, trapping, escape (with grace)/respawn, safe-support behavior, one-box carrying, timed drops, and pit drops | FR-4.x |
 | `overlaps`, `check_guard_collision`, `check_offscreen_falls`, `lose_life` (resets runner AND all guards) | Player/guard collision resolution, off-screen recovery, lives & game-over | FR-5.x |
 | `TIC()` completion branch | Six-second level transition and final-level celebration | FR-2.12, FR-2.13, FR-6.6 |
-| `TIC()` draw section (per-state guard/runner sprite selection) | Tile/entity/HUD rendering, level progress, boxes, lives, countdown | FR-6.x, FR-4.8 |
+| `TIC()` draw section (per-state guard/runner sprite selection) | Tile/entity/HUD rendering, optional carried-box rendering, level progress, boxes, lives, countdown | FR-6.x, FR-4.8, FR-4.10 |
 | `TIC()` input reads (`btn`, `btnp`, `keyp`) | Player input polling, dual-layout dig key | FR-7.x |
 
 ## 11. Design Rationale & Trade-offs
@@ -1102,3 +1119,7 @@ sequenceDiagram
 - **Above-tile dig check uses the live grid, not the static level data**: checking
   `tile_xy` (which digging/refill already mutate in place) means an already-open pit above the
   target naturally reads as non-solid, with no separate bookkeeping needed for that exception.
+- **Guard box state is separate from collection state**: a carried box is removed from the
+    tile grid but does not decrement `boxes_remaining`; it remains collectible after a timed
+    drop, a pit drop onto the surface tile, or a guard respawn. The `draw_carried_box` option
+    affects only rendering and defaults to `true`.

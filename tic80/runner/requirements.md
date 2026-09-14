@@ -75,6 +75,8 @@ traceability with the architecture document and future test cases.
 - **FR-4.6**: A trapped guard's tile shall act as safe, walkable support for the player (the player may stand on / cross over a trapped guard without dying and without falling through the hole).
 - **FR-4.7**: Contact between the player and a guard that is not trapped shall count as the player being caught.
 - **FR-4.8**: Guards shall have distinct sprites/animations for running, hanging on a bar, climbing a ladder, and falling, mirrored by facing direction the same way as the player.
+- **FR-4.9**: A guard may carry at most one box, shall drop it after 600 ticks plus a random 0-360 ticks, and shall drop it on the surface tile directly above a pit when falling into that pit.
+- **FR-4.10**: Guard box carrying shall remove the box from the tile while preserving the remaining-box count; timed drops, pit drops, and guard respawns shall restore the box without allowing more than one carried box per guard.
 
 ### Non-Functional Requirements
 
@@ -109,6 +111,7 @@ traceability with the architecture document and future test cases.
 - **FR-6.4**: Sprites shall visually mirror (flip) based on facing direction.
 - **FR-6.5**: During normal play, the HUD shall display the current level number and total number of levels on the same line as the boxes and lives counters.
 - **FR-6.6**: During the six-second level transition, the HUD shall display the completion message and remaining countdown; after the final level it shall display a final-all-levels-solved celebration.
+- **FR-6.7**: The `draw_carried_box` option shall control whether a carried box is rendered above its guard, and shall default to `true`.
 
 ### Non-Functional Requirements
 

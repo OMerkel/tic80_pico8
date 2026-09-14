@@ -13,12 +13,15 @@ STEP_TICKS=3        -- frames per movement step (controls runner speed, and the 
 GUARD_STEP_TICKS=6  -- only used to size the post-escape grace period; guard speed comes from MOVE_POLICY
 HOLE_LIFETIME=360    -- ticks until a dug hole refills itself
 GUARD_TRAP_ESCAPE=150 -- ticks a trapped guard needs to climb back out
+GUARD_BOX_CARRY_TICKS=600 -- base time a guard carries a box
+GUARD_BOX_CARRY_RANDOM=360 -- maximum random extra carry time
 LEVEL_COMPLETE_WAIT=360 -- 6 seconds at 60 TIC-80 frames per second
 LIVES_START=3
 SCREEN_HEIGHT=136
 
 -- guard AI flags / game options
 guards_pit_aware=false
+draw_carried_box=true
 
 -- classic Lode Runner move policy, indexed by guard count then cycle position:
 -- the total step budget grows sublinearly, so a crowd of guards is individually slower than a lone one
@@ -76,8 +79,8 @@ level_data = {
 },
 {x=40,y=8,spawn_x=40,spawn_y=8,dir=1,falling=false,idx=0,step=STEP_TICKS},
 {
- {x=4,y=56,spawn_x=4,spawn_y=56,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS},
- {x=196,y=56,spawn_x=196,spawn_y=56,dir=1,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS},
+ {x=4,y=56,spawn_x=4,spawn_y=56,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS,carrying=false,carry_timer=0},
+ {x=196,y=56,spawn_x=196,spawn_y=56,dir=1,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS,carrying=false,carry_timer=0},
 }},
 
 {{
@@ -100,9 +103,9 @@ level_data = {
 },
 {x=112,y=112,spawn_x=112,spawn_y=112,dir=1,falling=false,idx=0,step=STEP_TICKS},
 {
- {x=40,y=48,spawn_x=40,spawn_y=48,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS},
- {x=184,y=48,spawn_x=184,spawn_y=48,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS},
- {x=120,y=72,spawn_x=120,spawn_y=72,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS}
+ {x=40,y=48,spawn_x=40,spawn_y=48,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS,carrying=false,carry_timer=0},
+ {x=184,y=48,spawn_x=184,spawn_y=48,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS,carrying=false,carry_timer=0},
+ {x=120,y=72,spawn_x=120,spawn_y=72,dir=0,falling=false,idx=0,state="run",trapped_timer=0,tx=0,ty=0,step=GUARD_STEP_TICKS,carrying=false,carry_timer=0}
 }}
 
 }
@@ -347,7 +350,7 @@ function update_holes()
     return
    end
    if h.guard then respawn_guard(h.guard) end
-   set_tile_xy(h.tx,h.ty,h.orig)
+  if tile_xy(h.tx,h.ty)~="$" then set_tile_xy(h.tx,h.ty,h.orig) end
    holes[key]=nil
   end
  end
@@ -355,18 +358,24 @@ end
 
 function close_all_holes()
  for _,h in pairs(holes) do
-  set_tile_xy(h.tx,h.ty,h.orig)
+  if tile_xy(h.tx,h.ty)~="$" then set_tile_xy(h.tx,h.ty,h.orig) end
   if h.guard then h.guard.state="run" end
  end
  holes={}
 end
 
 function respawn_guard(g)
+ if g.carrying then
+  local _,tx,ty=tile_char_at_pixel(g.x+4,g.y+4)
+  set_tile_xy(tx,ty,"$")
+ end
  g.x=g.spawn_x
  g.y=g.spawn_y
  g.falling=false
  g.state="run"
  g.trapped_timer=0
+ g.carrying=false
+ g.carry_timer=0
 end
 
 function check_offscreen_falls()
@@ -390,6 +399,34 @@ function check_trap(g)
   g.x=8*(cur_tx-1)
   g.y=8*(cur_ty-1)
   hole.guard=g
+ end
+end
+
+function update_guard_box(g)
+ if g.carrying then
+  g.carry_timer=g.carry_timer-1
+  if g.carry_timer<=0 then
+   local _,tx,ty=tile_char_at_pixel(g.x+4,g.y+4)
+   set_tile_xy(tx,ty,"$")
+   g.carrying=false
+  end
+  return
+ end
+ local cur,tx,ty=tile_char_at_pixel(g.x+4,g.y+4)
+ if cur=="$" and g.state~="trapped" then
+  set_tile_xy(tx,ty," ")
+  g.carrying=true
+  g.carry_timer=GUARD_BOX_CARRY_TICKS+math.random(0,GUARD_BOX_CARRY_RANDOM)
+ end
+end
+
+function drop_guard_box_in_pit(g)
+ if not g.carrying then return end
+ local _,tx,ty=tile_char_at_pixel(g.x+4,g.y+4)
+ if holes[tx..","..ty] then
+  set_tile_xy(tx,ty-1,"$")
+  g.carrying=false
+  g.carry_timer=0
  end
 end
 
@@ -578,7 +615,9 @@ function update_guard(g)
  try_move_horizontal(g,action=="left",action=="right")
  local moved_vert=try_vertical_move(g,action=="up",action=="down")
  apply_gravity(g,moved_vert,action=="down")
+ drop_guard_box_in_pit(g)
  check_trap(g)
+ update_guard_box(g)
 end
 
 function overlaps(a,b)
@@ -716,6 +755,13 @@ function TIC()
    end
    g.idx=g_idx
    spr(g_base+g_idx,g.x,g.y,0,1,g.dir,0,1,1)
+  end
+ end
+
+ -- draw carried boxes after guards so they remain visible on top of the guard sprite
+ for _,g in ipairs(guards) do
+  if draw_carried_box and g.carrying then
+   spr(spr_box,g.x,g.y-8,0,1,0,0,1,1)
   end
  end
 
